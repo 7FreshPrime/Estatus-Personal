@@ -1,0 +1,598 @@
+<!DOCTYPE html>
+<html lang="es" class="dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Dashboard Personal Pro</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/react@18/umd/react.development.js" crossorigin></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js" crossorigin></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <script src="https://unpkg.com/lucide@latest"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    
+    <script>
+        tailwind.config = {
+            darkMode: 'class',
+            theme: {
+                extend: {
+                    fontFamily: { sans: ['Outfit', 'sans-serif'] },
+                    colors: {
+                        glass: 'rgba(255, 255, 255, 0.05)',
+                        glassBorder: 'rgba(255, 255, 255, 0.1)',
+                    }
+                }
+            }
+        }
+    </script>
+    <style>
+        body { 
+            background: linear-gradient(135deg, #0f172a 0%, #1e1b4b 100%);
+            color: #f8fafc;
+            min-height: 100vh;
+            background-attachment: fixed;
+        }
+        .glass-panel {
+            background: rgba(30, 41, 59, 0.7);
+            backdrop-filter: blur(16px);
+            -webkit-backdrop-filter: blur(16px);
+            border: 1px solid rgba(255, 255, 255, 0.08);
+            box-shadow: 0 4px 30px rgba(0, 0, 0, 0.1);
+        }
+        .custom-scrollbar::-webkit-scrollbar { width: 4px; }
+        .custom-scrollbar::-webkit-scrollbar-track { background: transparent; }
+        .custom-scrollbar::-webkit-scrollbar-thumb { background-color: rgba(255,255,255,0.2); border-radius: 20px; }
+        
+        /* Animaciones para el chat */
+        @keyframes fadeInUp { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+        .msg-enter { animation: fadeInUp 0.3s ease-out forwards; }
+    </style>
+</head>
+<body>
+    <div id="root"></div>
+
+    <script type="module" data-type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged, GoogleAuthProvider, signInWithPopup } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, doc, setDoc, deleteDoc, updateDoc, onSnapshot, collection, getDocs } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        window.firebaseModules = { initializeApp, getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged, getFirestore, doc, setDoc, deleteDoc, updateDoc, onSnapshot, collection, getDocs, GoogleAuthProvider, signInWithPopup };
+    </script>
+
+    <script type="text/babel" data-type="module">
+        const { useState, useEffect, useRef } = React;
+
+        // --- Configuración de Entorno y Firebase ---
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'dashboard-ai-app';
+        const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {};
+        const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+
+        let app, db, auth;
+        if (Object.keys(firebaseConfig).length > 0) {
+            app = window.firebaseModules.initializeApp(firebaseConfig);
+            db = window.firebaseModules.getFirestore(app);
+            auth = window.firebaseModules.getAuth(app);
+        }
+
+        // --- Utilidades Constantes ---
+        const FAMILIAS = {
+            'Trabajo': { code: 'TRB', color: 'bg-blue-500/20 text-blue-300 border-blue-500/30' },
+            'Salud': { code: 'SLD', color: 'bg-emerald-500/20 text-emerald-300 border-emerald-500/30' },
+            'Alimentación': { code: 'ALI', color: 'bg-orange-500/20 text-orange-300 border-orange-500/30' },
+            'Personal': { code: 'PER', color: 'bg-purple-500/20 text-purple-300 border-purple-500/30' }
+        };
+        const STATUS = ['Pendiente', 'En Progreso', 'Terminado'];
+        
+        const getTodayStr = () => {
+            const d = new Date(); d.setMinutes(d.getMinutes() - d.getTimezoneOffset());
+            return d.toISOString().split('T')[0];
+        };
+        const generateId = () => Math.random().toString(36).substr(2, 9);
+
+        // Parseador de horas aproximadas para la gráfica circular
+        const parseHours = (act) => {
+            if (act.timeRange) return 9.5; // Jornada aprox (09:00 - 18:30)
+            if (act.duration) {
+                if (act.duration.includes('min')) return parseInt(act.duration) / 60;
+                if (act.duration.includes('hora')) return parseInt(act.duration);
+            }
+            return 1; // Default
+        };
+
+        // --- UI Components ---
+        const Modal = ({ isOpen, onClose, title, children }) => {
+            if (!isOpen) return null;
+            return (
+                <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex justify-center items-center p-4">
+                    <div className="glass-panel rounded-2xl w-full max-w-md overflow-hidden flex flex-col shadow-2xl border border-white/10">
+                        <div className="p-4 border-b border-white/10 flex justify-between items-center bg-white/5">
+                            <h2 className="text-lg font-bold text-white">{title}</h2>
+                            <button onClick={onClose} className="text-gray-400 hover:text-white transition">&times;</button>
+                        </div>
+                        <div className="p-5">{children}</div>
+                    </div>
+                </div>
+            );
+        };
+
+        // --- Gráficos Componentes ---
+        const ChartsArea = ({ activities }) => {
+            const pieChartRef = useRef(null);
+            const barChartRef = useRef(null);
+            const pieInstance = useRef(null);
+            const barInstance = useRef(null);
+
+            useEffect(() => {
+                if (!pieChartRef.current || !barChartRef.current) return;
+
+                // Datos para Gráfico de Utilización de Tiempo (Pie)
+                const timeByFamily = { Trabajo: 0, Salud: 0, Alimentación: 0, Personal: 0 };
+                activities.forEach(a => { if(FAMILIAS[a.family]) timeByFamily[a.family] += parseHours(a); });
+                const totalHours = Object.values(timeByFamily).reduce((a,b)=>a+b,0);
+                const freeTime = Math.max(0, 24 - totalHours);
+                
+                const pieLabels = ['Trabajo', 'Salud', 'Aliment.', 'Personal', 'Tiempo Libre'];
+                const pieData = [timeByFamily.Trabajo, timeByFamily.Salud, timeByFamily.Alimentación, timeByFamily.Personal, freeTime];
+
+                // Datos para Gráfico de Progreso (Bar)
+                const counts = { 'Pendiente': 0, 'En Progreso': 0, 'Terminado': 0 };
+                activities.forEach(a => { if(counts[a.status] !== undefined) counts[a.status]++; });
+
+                Chart.defaults.color = '#94a3b8';
+                Chart.defaults.font.family = 'Outfit';
+
+                // Render Pie Chart
+                if (pieInstance.current) pieInstance.current.destroy();
+                pieInstance.current = new Chart(pieChartRef.current, {
+                    type: 'doughnut',
+                    data: {
+                        labels: pieLabels,
+                        datasets: [{
+                            data: pieData,
+                            backgroundColor: ['#3b82f6', '#10b981', '#f97316', '#a855f7', '#334155'],
+                            borderWidth: 0,
+                        }]
+                    },
+                    options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { position: 'right' } } }
+                });
+
+                // Render Bar Chart
+                if (barInstance.current) barInstance.current.destroy();
+                barInstance.current = new Chart(barChartRef.current, {
+                    type: 'bar',
+                    data: {
+                        labels: STATUS,
+                        datasets: [{
+                            label: 'Tareas por Estado',
+                            data: [counts['Pendiente'], counts['En Progreso'], counts['Terminado']],
+                            backgroundColor: ['#ef4444', '#eab308', '#22c55e'],
+                            borderRadius: 6,
+                        }]
+                    },
+                    options: { 
+                        responsive: true, maintainAspectRatio: false, 
+                        plugins: { legend: { display: false } },
+                        scales: { y: { beginAtZero: true, grid: { color: 'rgba(255,255,255,0.1)' } }, x: { grid: { display: false } } }
+                    }
+                });
+
+                return () => {
+                    if (pieInstance.current) pieInstance.current.destroy();
+                    if (barInstance.current) barInstance.current.destroy();
+                };
+            }, [activities]);
+
+            return (
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-8">
+                    <div className="glass-panel p-5 rounded-2xl">
+                        <h3 className="text-sm font-semibold text-gray-300 mb-4 uppercase tracking-wider">Distribución del Tiempo (24h)</h3>
+                        <div className="h-48 relative"><canvas ref={pieChartRef}></canvas></div>
+                    </div>
+                    <div className="glass-panel p-5 rounded-2xl">
+                        <h3 className="text-sm font-semibold text-gray-300 mb-4 uppercase tracking-wider">Progreso de Tareas</h3>
+                        <div className="h-48 relative"><canvas ref={barChartRef}></canvas></div>
+                    </div>
+                </div>
+            );
+        };
+
+        // --- Aplicación Principal ---
+        const Dashboard = () => {
+            const [user, setUser] = useState(null);
+            const [activities, setActivities] = useState([]);
+            const [loading, setLoading] = useState(true);
+            const [currentDate] = useState(getTodayStr());
+            const [gymModalOpen, setGymModalOpen] = useState(false);
+            const [isTaskModalOpen, setIsTaskModalOpen] = useState(false);
+            const [formData, setFormData] = useState({ title: '', family: 'Trabajo', description: '', duration: '' });
+            
+            // IA Chat State
+            const [chatOpen, setChatOpen] = useState(false);
+            const [chatInput, setChatInput] = useState("");
+            const [chatMessages, setChatMessages] = useState([{role: 'ai', text: '¡Hola! Soy tu asistente. Dime qué has avanzado o qué quieres agendar y actualizaré el tablero.'}]);
+            const [isAiTyping, setIsAiTyping] = useState(false);
+            const chatEndRef = useRef(null);
+
+            // --- Autenticación ---
+            useEffect(() => {
+                const initAuth = async () => {
+                    if (!auth) { setLoading(false); return; }
+                    try {
+                        // REGLA OBLIGATORIA DEL ENTORNO CANVAS: Usar CustomToken/Anónimo primero.
+                        if (initialAuthToken) {
+                            await window.firebaseModules.signInWithCustomToken(auth, initialAuthToken);
+                        } else {
+                            await window.firebaseModules.signInAnonymously(auth);
+                        }
+                        
+                        /* NOTA PARA GITHUB PAGES:
+                           Si subes esto a tu GitHub, comenta las 5 líneas de arriba (desde 'if (initialAuthToken)' hasta '} else { ... }') 
+                           y reemplázalo por el Login con Google usando un botón en la UI que dispare esto:
+                           
+                           const provider = new window.firebaseModules.GoogleAuthProvider();
+                           window.firebaseModules.signInWithPopup(auth, provider).then((result) => { setUser(result.user); });
+                           
+                           Por ahora el entorno Canvas maneja la sesión para que funcione al instante.
+                        */
+                        setUser(auth.currentUser);
+                    } catch (error) {
+                        console.error("Auth error:", error);
+                        setLoading(false);
+                    }
+                };
+                initAuth();
+            }, []);
+
+            // --- Carga de Datos (Reglas Firebase) ---
+            useEffect(() => {
+                if (!user || !db) return;
+                const colRef = window.firebaseModules.collection(db, 'artifacts', appId, 'users', user.uid, 'activities');
+                
+                const unsubscribe = window.firebaseModules.onSnapshot(colRef, (snapshot) => {
+                    const allActs = [];
+                    snapshot.forEach(doc => allActs.push({ id: doc.id, ...doc.data() }));
+                    
+                    // REGLA: No complex queries en firestore (where). Filtrar en memoria.
+                    const todaysActs = allActs.filter(a => a.date === currentDate);
+                    setActivities(todaysActs);
+                    
+                    if (todaysActs.length === 0) generateUntouchables();
+                    else if (!todaysActs.some(a => a.title.includes('Gym') || a.title.includes('Gimnasio')) && !localStorage.getItem(`gym_${currentDate}`)) {
+                        setGymModalOpen(true);
+                    }
+                    setLoading(false);
+                }, console.error);
+
+                return () => unsubscribe();
+            }, [user, currentDate]);
+
+            // --- Scroll Chat ---
+            useEffect(() => {
+                chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
+            }, [chatMessages]);
+
+            // --- Lógica Kanban ---
+            const getNextCode = (family) => {
+                const prefix = FAMILIAS[family]?.code || 'GEN';
+                const familyActs = activities.filter(a => a.family === family);
+                return `${prefix}-${String(familyActs.length + 1).padStart(3, '0')}`;
+            };
+
+            const generateUntouchables = async () => {
+                if (!user || !db) return;
+                const acts = [
+                    { title: 'Desayuno', family: 'Alimentación', duration: '30 min', timeRange: '08:00 - 08:30' },
+                    { title: 'Trabajo (Jornada)', family: 'Trabajo', timeRange: '09:00 - 18:30' },
+                    { title: 'Almuerzo', family: 'Alimentación', duration: '1 hora' },
+                    { title: 'Cena', family: 'Alimentación', duration: '1 hora' }
+                ];
+                let counts = { 'Trabajo': 0, 'Alimentación': 0 };
+
+                for (const act of acts) {
+                    counts[act.family]++;
+                    const code = `${FAMILIAS[act.family].code}-${String(counts[act.family]).padStart(3, '0')}`;
+                    const actData = { ...act, code, status: 'Pendiente', type: 'untouchable', date: currentDate, createdAt: Date.now() };
+                    const docRef = window.firebaseModules.doc(db, 'artifacts', appId, 'users', user.uid, 'activities', generateId());
+                    await window.firebaseModules.setDoc(docRef, actData);
+                }
+                if(!localStorage.getItem(`gym_${currentDate}`)) setGymModalOpen(true);
+            };
+
+            const addGym = async (yes) => {
+                localStorage.setItem(`gym_${currentDate}`, 'true');
+                setGymModalOpen(false);
+                if (yes && user && db) {
+                    const docRef = window.firebaseModules.doc(db, 'artifacts', appId, 'users', user.uid, 'activities', generateId());
+                    await window.firebaseModules.setDoc(docRef, {
+                        title: 'Entrenamiento (Gym)', family: 'Salud', code: getNextCode('Salud'),
+                        status: 'Pendiente', type: 'untouchable', duration: '2 horas', date: currentDate, createdAt: Date.now()
+                    });
+                }
+            };
+
+            const handleAddTask = async (e) => {
+                e.preventDefault();
+                if (!user || !db || !formData.title) return;
+                const newAct = {
+                    ...formData, code: getNextCode(formData.family), status: 'Pendiente', 
+                    type: 'custom', date: currentDate, createdAt: Date.now()
+                };
+                const docRef = window.firebaseModules.doc(db, 'artifacts', appId, 'users', user.uid, 'activities', generateId());
+                await window.firebaseModules.setDoc(docRef, newAct);
+                setIsTaskModalOpen(false);
+                setFormData({ title: '', family: 'Trabajo', description: '', duration: '' });
+            };
+
+            const updateStatus = async (id, status) => {
+                if (!user || !db) return;
+                const docRef = window.firebaseModules.doc(db, 'artifacts', appId, 'users', user.uid, 'activities', id);
+                await window.firebaseModules.updateDoc(docRef, { status });
+            };
+
+            const deleteTask = async (id) => {
+                if (!user || !db) return;
+                const docRef = window.firebaseModules.doc(db, 'artifacts', appId, 'users', user.uid, 'activities', id);
+                await window.firebaseModules.deleteDoc(docRef);
+            };
+
+            // --- Lógica del Asistente IA (Gemini) ---
+            const handleAIChat = async (e) => {
+                e.preventDefault();
+                if(!chatInput.trim()) return;
+                const userText = chatInput.trim();
+                setChatInput("");
+                setChatMessages(prev => [...prev, { role: 'user', text: userText }]);
+                setIsAiTyping(true);
+
+                // Payload para Gemini API usando JSON Schema
+                const apiKey = ""; // Canvas provee la API KEY si está vacía
+                const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:generateContent?key=${apiKey}`;
+                
+                // Preparar contexto simplificado para evitar exceder tokens
+                const currentTasks = activities.map(a => ({ id: a.id, title: a.title, status: a.status, code: a.code }));
+                
+                const systemInstruction = `
+Eres el asistente del Dashboard Personal. Tienes el poder de modificar las tareas del usuario.
+Las tareas actuales son: ${JSON.stringify(currentTasks)}
+Familias válidas: Trabajo, Alimentación, Salud, Personal.
+Estados válidos: Pendiente, En Progreso, Terminado.
+Basado en lo que diga el usuario, responde amigablemente y especifica una acción si requiere crear o actualizar algo.`;
+
+                const payload = {
+                    contents: [{ role: 'user', parts: [{ text: userText }] }],
+                    systemInstruction: { parts: [{ text: systemInstruction }] },
+                    generationConfig: {
+                        responseMimeType: "application/json",
+                        responseSchema: {
+                            type: "OBJECT",
+                            properties: {
+                                message: { type: "STRING" },
+                                action: { type: "STRING", description: "NONE, ADD, UPDATE_STATUS" },
+                                payload: {
+                                    type: "OBJECT",
+                                    properties: {
+                                        id: { type: "STRING" },
+                                        title: { type: "STRING" },
+                                        family: { type: "STRING" },
+                                        duration: { type: "STRING" },
+                                        status: { type: "STRING" }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                };
+
+                try {
+                    const response = await fetch(apiUrl, {
+                        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload)
+                    });
+                    const result = await response.json();
+                    
+                    if (result.candidates && result.candidates[0].content) {
+                        const jsonStr = result.candidates[0].content.parts[0].text;
+                        const aiData = JSON.parse(jsonStr);
+                        
+                        setChatMessages(prev => [...prev, { role: 'ai', text: aiData.message }]);
+                        
+                        // Ejecutar la acción que dictó la IA
+                        if (aiData.action === 'ADD' && aiData.payload.title) {
+                            const family = aiData.payload.family || 'Personal';
+                            const code = getNextCode(family);
+                            const newAct = {
+                                title: aiData.payload.title, family: family,
+                                duration: aiData.payload.duration || '', code: code,
+                                status: aiData.payload.status || 'Pendiente', type: 'custom', date: currentDate, createdAt: Date.now()
+                            };
+                            const docRef = window.firebaseModules.doc(db, 'artifacts', appId, 'users', user.uid, 'activities', generateId());
+                            await window.firebaseModules.setDoc(docRef, newAct);
+                        } else if (aiData.action === 'UPDATE_STATUS' && aiData.payload.id && aiData.payload.status) {
+                             await updateStatus(aiData.payload.id, aiData.payload.status);
+                        }
+                    } else {
+                         setChatMessages(prev => [...prev, { role: 'ai', text: "Lo siento, hubo un error al procesar tu solicitud." }]);
+                    }
+                } catch(error) {
+                    console.error("Gemini Error:", error);
+                    setChatMessages(prev => [...prev, { role: 'ai', text: "No pude conectarme al servidor de IA en este momento." }]);
+                }
+                setIsAiTyping(false);
+            };
+
+            if (loading) return <div className="min-h-screen flex items-center justify-center text-white/50 text-xl font-light">Iniciando Ecosistema...</div>;
+
+            return (
+                <div className="min-h-screen flex flex-col md:flex-row relative overflow-hidden">
+                    
+                    {/* Contenido Principal */}
+                    <main className="flex-1 p-4 md:p-8 overflow-y-auto custom-scrollbar relative z-10 pb-24 md:pb-8">
+                        <header className="flex flex-col md:flex-row justify-between items-start md:items-center mb-10 gap-4">
+                            <div>
+                                <h1 className="text-4xl md:text-5xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-blue-400 to-purple-400">
+                                    Control Panel
+                                </h1>
+                                <p className="text-gray-400 mt-2 text-sm font-medium">
+                                    {new Date().toLocaleDateString('es-ES', { weekday: 'long', day: 'numeric', month: 'long' }).toUpperCase()}
+                                </p>
+                            </div>
+                            <button onClick={() => setIsTaskModalOpen(true)} className="bg-white/10 hover:bg-white/20 border border-white/20 text-white px-6 py-3 rounded-xl font-medium transition backdrop-blur-md flex items-center gap-2">
+                                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 4v16m8-8H4"></path></svg>
+                                Nueva Actividad
+                            </button>
+                        </header>
+
+                        {/* Gráficas (Sustituye los checkins viejos) */}
+                        <ChartsArea activities={activities} />
+
+                        {/* Kanban Moderno */}
+                        <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+                            {STATUS.map(status => (
+                                <div key={status} className="glass-panel rounded-3xl p-5 flex flex-col min-h-[50vh]">
+                                    <div className="flex justify-between items-center mb-6">
+                                        <h2 className="font-semibold text-gray-200 tracking-wide">{status}</h2>
+                                        <span className="bg-white/10 text-gray-300 px-3 py-1 rounded-full text-xs font-bold border border-white/5">
+                                            {activities.filter(a => a.status === status).length}
+                                        </span>
+                                    </div>
+                                    <div className="flex flex-col gap-4 flex-1">
+                                        {activities.filter(a => a.status === status).map(act => (
+                                            <div key={act.id} className="bg-white/5 border border-white/10 p-5 rounded-2xl hover:bg-white/10 transition group">
+                                                <div className="flex justify-between items-start mb-3">
+                                                    <span className={`px-2.5 py-1 rounded-lg text-[10px] font-bold uppercase tracking-wider border ${FAMILIAS[act.family]?.color || 'bg-gray-500/20 text-gray-300'}`}>
+                                                        {act.code}
+                                                    </span>
+                                                </div>
+                                                <h3 className="font-medium text-gray-100 text-lg leading-tight mb-2">{act.title}</h3>
+                                                {(act.duration || act.timeRange) && (
+                                                    <p className="text-sm text-gray-400 flex items-center gap-1.5 mb-4">
+                                                        <svg className="w-4 h-4 opacity-70" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
+                                                        {act.timeRange || act.duration}
+                                                    </p>
+                                                )}
+                                                
+                                                <div className="flex items-center gap-2 pt-3 border-t border-white/10">
+                                                    <select 
+                                                        value={act.status} onChange={(e) => updateStatus(act.id, e.target.value)}
+                                                        className="bg-transparent text-sm text-gray-300 border border-white/20 rounded-lg px-2 py-1.5 focus:outline-none focus:border-blue-400 w-full appearance-none"
+                                                    >
+                                                        {STATUS.map(s => <option key={s} value={s} className="bg-slate-800">{s}</option>)}
+                                                    </select>
+                                                    {act.type !== 'untouchable' && (
+                                                        <button onClick={() => deleteTask(act.id)} className="p-2 text-gray-500 hover:text-red-400 hover:bg-red-400/10 rounded-lg transition">
+                                                            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg>
+                                                        </button>
+                                                    )}
+                                                </div>
+                                            </div>
+                                        ))}
+                                    </div>
+                                </div>
+                            ))}
+                        </div>
+                    </main>
+
+                    {/* Botón flotante IA (Móvil & PC) */}
+                    <button 
+                        onClick={() => setChatOpen(!chatOpen)}
+                        className={`fixed bottom-6 right-6 z-50 p-4 rounded-full shadow-2xl backdrop-blur-md transition-all duration-300 border ${chatOpen ? 'bg-red-500/20 text-red-300 border-red-500/30 rotate-45' : 'bg-blue-500/20 text-blue-300 border-blue-500/30 hover:scale-110'}`}
+                    >
+                        <svg className="w-8 h-8" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            {chatOpen ? <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12"></path>
+                                      : <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M8 10h.01M12 10h.01M16 10h.01M9 16H5a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v8a2 2 0 01-2 2h-5l-5 5v-5z"></path>}
+                        </svg>
+                    </button>
+
+                    {/* Panel Lateral de Chat IA */}
+                    <aside className={`fixed top-0 right-0 h-full w-full md:w-96 glass-panel border-l border-white/10 z-40 flex flex-col transition-transform duration-500 transform ${chatOpen ? 'translate-x-0' : 'translate-x-full'}`}>
+                        <div className="p-5 border-b border-white/10 bg-white/5 flex items-center gap-3">
+                            <div className="w-10 h-10 rounded-full bg-gradient-to-tr from-purple-500 to-blue-500 flex items-center justify-center shadow-lg">
+                                <svg className="w-6 h-6 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M13 10V3L4 14h7v7l9-11h-7z"></path></svg>
+                            </div>
+                            <div>
+                                <h3 className="font-bold text-white tracking-wide">Gemini Assistant</h3>
+                                <p className="text-xs text-blue-300">Conectado y listo</p>
+                            </div>
+                        </div>
+                        
+                        {/* Mensajes */}
+                        <div className="flex-1 overflow-y-auto p-4 flex flex-col gap-4 custom-scrollbar">
+                            {chatMessages.map((msg, i) => (
+                                <div key={i} className={`msg-enter flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+                                    <div className={`max-w-[85%] rounded-2xl px-4 py-2.5 text-sm leading-relaxed ${msg.role === 'user' ? 'bg-blue-600/80 text-white rounded-tr-sm' : 'bg-white/10 text-gray-200 border border-white/5 rounded-tl-sm'}`}>
+                                        {msg.text}
+                                    </div>
+                                </div>
+                            ))}
+                            {isAiTyping && (
+                                <div className="flex justify-start msg-enter">
+                                    <div className="bg-white/10 rounded-2xl rounded-tl-sm px-4 py-3 border border-white/5 flex gap-1">
+                                        <div className="w-2 h-2 bg-blue-400 rounded-full animate-bounce"></div>
+                                        <div className="w-2 h-2 bg-blue-400 rounded-full animate-bounce" style={{animationDelay: '0.1s'}}></div>
+                                        <div className="w-2 h-2 bg-blue-400 rounded-full animate-bounce" style={{animationDelay: '0.2s'}}></div>
+                                    </div>
+                                </div>
+                            )}
+                            <div ref={chatEndRef} />
+                        </div>
+                        
+                        {/* Input Chat */}
+                        <div className="p-4 border-t border-white/10 bg-white/5">
+                            <form onSubmit={handleAIChat} className="relative flex items-center">
+                                <input 
+                                    type="text" value={chatInput} onChange={e=>setChatInput(e.target.value)}
+                                    placeholder="Ej: Terminé la cena..."
+                                    className="w-full bg-black/30 border border-white/10 rounded-full py-3 pl-4 pr-12 text-sm text-white placeholder-gray-500 focus:outline-none focus:border-blue-500/50 transition"
+                                />
+                                <button type="submit" className="absolute right-2 p-2 bg-blue-500/20 text-blue-400 rounded-full hover:bg-blue-500/40 transition">
+                                    <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8"></path></svg>
+                                </button>
+                            </form>
+                        </div>
+                    </aside>
+
+                    {/* Modales */}
+                    <Modal isOpen={gymModalOpen} onClose={() => setGymModalOpen(false)} title="🔥 Entrenamiento Diario">
+                        <div className="text-center space-y-4">
+                            <p className="text-gray-300 text-sm">Tu objetivo son 5 veces por semana. ¿Vas a sudar hoy?</p>
+                            <div className="flex gap-3 mt-4">
+                                <button onClick={() => addGym(false)} className="flex-1 bg-white/5 hover:bg-white/10 border border-white/10 text-gray-300 py-3 rounded-xl transition">Descanso</button>
+                                <button onClick={() => addGym(true)} className="flex-1 bg-gradient-to-r from-emerald-500 to-emerald-600 hover:from-emerald-400 hover:to-emerald-500 text-white font-bold py-3 rounded-xl shadow-lg transition">¡Sí, a entrenar!</button>
+                            </div>
+                        </div>
+                    </Modal>
+
+                    <Modal isOpen={isTaskModalOpen} onClose={() => setIsTaskModalOpen(false)} title="Crear Actividad">
+                        <form onSubmit={handleAddTask} className="space-y-4">
+                            <div>
+                                <label className="block text-xs font-medium text-gray-400 mb-1">Título</label>
+                                <input required type="text" value={formData.title} onChange={e => setFormData({...formData, title: e.target.value})}
+                                    className="w-full bg-black/30 border border-white/10 rounded-xl px-4 py-2.5 text-white focus:outline-none focus:border-blue-500 transition" />
+                            </div>
+                            <div className="grid grid-cols-2 gap-4">
+                                <div>
+                                    <label className="block text-xs font-medium text-gray-400 mb-1">Familia</label>
+                                    <select value={formData.family} onChange={e => setFormData({...formData, family: e.target.value})}
+                                        className="w-full bg-black/30 border border-white/10 rounded-xl px-4 py-2.5 text-white focus:outline-none focus:border-blue-500 appearance-none">
+                                        {Object.keys(FAMILIAS).map(f => <option key={f} value={f} className="bg-slate-800">{f}</option>)}
+                                    </select>
+                                </div>
+                                <div>
+                                    <label className="block text-xs font-medium text-gray-400 mb-1">Duración</label>
+                                    <input type="text" placeholder="Ej: 1 hora, 30 min" value={formData.duration} onChange={e => setFormData({...formData, duration: e.target.value})}
+                                        className="w-full bg-black/30 border border-white/10 rounded-xl px-4 py-2.5 text-white focus:outline-none focus:border-blue-500 transition" />
+                                </div>
+                            </div>
+                            <button type="submit" className="w-full bg-blue-600/80 hover:bg-blue-600 text-white font-bold py-3 rounded-xl mt-2 transition">Guardar</button>
+                        </form>
+                    </Modal>
+
+                </div>
+            );
+        };
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<Dashboard />);
+    </script>
+</body>
+</html>
